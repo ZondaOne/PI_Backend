@@ -17,9 +17,11 @@ const port = process.env.PORT || 3000;
 // CORS configuration
 const corsOptions = {
   origin: [
+    'http://localhost:3000',
+    'https://zonda.one',
+    'https://www.zonda.one',
     process.env.FRONTEND_URL,
-    'chrome-extension://*',
-  ],
+  ].filter(Boolean),
   credentials: true,
 };
 
