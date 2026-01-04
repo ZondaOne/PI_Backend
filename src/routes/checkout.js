@@ -3,7 +3,7 @@ import Stripe from 'stripe';
 import { authMiddleware } from '../auth.js';
 
 const router = express.Router();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY?.trim());
 const FRONTEND_URL = process.env.FRONTEND_URL;
 const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
 

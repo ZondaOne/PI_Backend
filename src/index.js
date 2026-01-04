@@ -11,7 +11,7 @@ import checkoutRoutes from './routes/checkout.js';
 dotenv.config();
 
 const app = express();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY?.trim());
 const port = process.env.PORT || 3000;
 
 // CORS configuration
