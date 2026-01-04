@@ -44,8 +44,8 @@ router.post('/request', async (req, res) => {
         // Send email
         const magicLink = `${FRONTEND_URL}/privacyInterceptor/auth/verify?token=${token}`;
 
-        await resend.emails.send({
-            from: 'Privacy Interceptor <noreply@zonda.one>',
+        const { data, error } = await resend.emails.send({
+            from: 'Privacy Interceptor <noreply@updates.rhivo.app>',
             to: email,
             subject: 'Sign in to Privacy Interceptor',
             html: `
@@ -57,6 +57,11 @@ router.post('/request', async (req, res) => {
         </div>
       `,
         });
+
+        if (error) {
+            console.error('Resend error:', error);
+            return res.status(500).json({ error: 'Failed to send email', details: error });
+        }
 
         res.json({ success: true });
     } catch (error) {
