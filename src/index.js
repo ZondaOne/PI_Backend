@@ -5,6 +5,8 @@ import Stripe from 'stripe';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
+import authRoutes from './routes/auth.js';
+import checkoutRoutes from './routes/checkout.js';
 
 dotenv.config();
 
@@ -12,7 +14,16 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 3000;
 
-// Webhook needs raw body
+// CORS configuration
+const corsOptions = {
+  origin: [
+    process.env.FRONTEND_URL,
+    'chrome-extension://*',
+  ],
+  credentials: true,
+};
+
+// Webhook needs raw body - must be before express.json()
 app.post('/update-status', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -35,7 +46,7 @@ app.post('/update-status', express.raw({ type: 'application/json' }), async (req
       await db.update(users)
         .set({ isPremium: true })
         .where(eq(users.email, customerEmail));
-      
+
       console.log(`Updated premium status for ${customerEmail}`);
     } catch (dbErr) {
       console.error('Database update error:', dbErr);
@@ -47,9 +58,13 @@ app.post('/update-status', express.raw({ type: 'application/json' }), async (req
 });
 
 app.use(express.json());
-app.use(cors());
+app.use(cors(corsOptions));
 
-// POST /check-status
+// Routes
+app.use('/auth', authRoutes);
+app.use('/checkout', checkoutRoutes);
+
+// Legacy endpoint for checking status by email (used by extension)
 app.post('/check-status', async (req, res) => {
   const { email } = req.body;
 
@@ -71,6 +86,11 @@ app.post('/check-status', async (req, res) => {
     console.error('Check status error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
 });
 
 app.listen(port, () => {
