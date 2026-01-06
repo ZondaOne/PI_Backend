@@ -15,6 +15,13 @@
       "when": 1767554117790,
       "tag": "0001_striped_photon",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1767699390775,
+      "tag": "0002_blue_stellaris",
+      "breakpoints": true
     }
   ]
 }

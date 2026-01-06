@@ -42,25 +42,75 @@ app.post('/update-status', express.raw({ type: 'application/json' }), async (req
   // Handle the event
   console.log(`Webhook received: ${event.type}`);
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    // Use customer_email (passed when creating session) not customer_details.email
-    const customerEmail = session.customer_email;
-
-    console.log(`Processing checkout.session.completed for email: ${customerEmail}`);
-    console.log(`Session ID: ${session.id}, Payment status: ${session.payment_status}`);
-
+  const handleStatusUpdate = async (identifier, isPremium, findBy = 'email') => {
+    if (!identifier) {
+      console.warn(`No ${findBy} found in event for status update`);
+      return;
+    }
     try {
+      const condition = findBy === 'email' ? eq(users.email, identifier) : eq(users.stripeChargeId, identifier);
       const result = await db.update(users)
-        .set({ isPremium: true })
-        .where(eq(users.email, customerEmail));
-
-      console.log(`DB update result for ${customerEmail}:`, result);
-      console.log(`Updated premium status for ${customerEmail}`);
+        .set({ isPremium })
+        .where(condition);
+      console.log(`DB update result for ${identifier} via ${findBy} (isPremium: ${isPremium}):`, result);
     } catch (dbErr) {
       console.error('Database update error:', dbErr);
-      return res.status(500).send('Database error');
     }
+  };
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const customerEmail = session.customer_email;
+    const paymentIntentId = session.payment_intent;
+    
+    // Attempt to get the charge ID if it's available directly, 
+    // though usually we'll need to expand or use PI.
+    // However, for simplicity and reliability, we can store PI or wait for charge.succeeded
+    // but standard disputes refer to the Charge ID.
+    // Let's get the charge ID from the session if possible.
+    
+    let chargeId = null;
+    if (session.payment_status === 'paid') {
+      try {
+        const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
+          expand: ['payment_intent.latest_charge'],
+        });
+        chargeId = fullSession.payment_intent?.latest_charge?.id;
+      } catch (err) {
+        console.error('Error retrieving session for charge ID:', err);
+      }
+    }
+
+    console.log(`Processing checkout.session.completed for email: ${customerEmail}, charge: ${chargeId}`);
+    
+    // Update premium status and store chargeId
+    try {
+      await db.update(users)
+        .set({ isPremium: true, stripeChargeId: chargeId })
+        .where(eq(users.email, customerEmail));
+    } catch (err) {
+      console.error('Failed to update user premium status/chargeId:', err);
+    }
+
+  } else if (event.type === 'charge.dispute.created') {
+    const dispute = event.data.object;
+    const chargeId = dispute.charge; // This is the ID we stored
+    console.log(`Processing charge.dispute.created for charge: ${chargeId}`);
+    await handleStatusUpdate(chargeId, false, 'chargeId');
+  } else if (event.type === 'charge.dispute.closed') {
+    const dispute = event.data.object;
+    const chargeId = dispute.charge;
+    console.log(`Processing charge.dispute.closed for charge: ${chargeId}, status: ${dispute.status}`);
+    
+    // If we won the dispute, restore premium status
+    if (dispute.status === 'won') {
+      await handleStatusUpdate(chargeId, true, 'chargeId');
+    }
+  } else if (event.type === 'charge.refunded') {
+    const charge = event.data.object;
+    const chargeId = charge.id;
+    console.log(`Processing charge.refunded for charge: ${chargeId}`);
+    await handleStatusUpdate(chargeId, false, 'chargeId');
   }
 
   res.json({ received: true });

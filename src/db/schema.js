@@ -5,6 +5,7 @@ export const users = pgTable('user', {
   email: varchar('email', { length: 255 }).unique().notNull(),
   passwordhash: varchar('passwordhash', { length: 255 }),
   isPremium: boolean('isPremium').default(false).notNull(),
+  stripeChargeId: varchar('stripeChargeId', { length: 255 }),
 });
 
 export const magicTokens = pgTable('magic_token', {

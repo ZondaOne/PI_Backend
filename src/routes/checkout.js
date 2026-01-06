@@ -21,6 +21,9 @@ router.post('/create', authMiddleware, async (req, res) => {
             mode: 'payment',
             payment_method_types: ['card'],
             customer_email: req.user.email,
+            metadata: {
+                email: req.user.email
+            },
             line_items: [
                 {
                     price: STRIPE_PRICE_ID,
