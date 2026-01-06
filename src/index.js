@@ -34,7 +34,6 @@ app.post('/update-status', express.raw({ type: 'application/json' }), async (req
   }
 
   let event;
-
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
@@ -47,78 +46,112 @@ app.post('/update-status', express.raw({ type: 'application/json' }), async (req
   const handleStatusUpdate = async (identifier, isPremium, findBy = 'email') => {
     if (!identifier) {
       console.warn(`No ${findBy} found in event for status update`);
-      return;
+      return null;
     }
+
+    const idClean = typeof identifier === 'string' ? identifier.trim() : identifier;
+
+    let condition;
+    if (findBy === 'email') {
+      condition = eq(users.email, idClean);
+    } else if (findBy === 'chargeId') {
+      condition = eq(users.stripeChargeId, idClean);
+    } else if (findBy === 'paymentIntent') {
+      condition = eq(users.stripePaymentIntentId, idClean);
+    } else {
+      condition = eq(users.stripeChargeId, idClean);
+    }
+
     try {
-      const condition = findBy === 'email' ? eq(users.email, identifier) : eq(users.stripeChargeId, identifier);
       const result = await db.update(users)
         .set({ isPremium })
         .where(condition);
-      console.log(`DB update result for ${identifier} via ${findBy} (isPremium: ${isPremium}):`, result);
+
+      // Log rowCount clearly so you can see whether match happened
+      console.log(`DB update result for ${idClean} via ${findBy} (isPremium: ${isPremium}):`, result);
+      return result;
     } catch (dbErr) {
       console.error('Database update error:', dbErr);
+      return null;
     }
   };
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const customerEmail = session.customer_email || session.metadata?.email;
-    
-    let chargeId = null;
-    if (session.payment_status === 'paid') {
-      try {
-        const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
-          expand: ['payment_intent.latest_charge'],
-        });
-        chargeId = fullSession.payment_intent?.latest_charge?.id || fullSession.payment_intent?.id;
-      } catch (err) {
-        console.error('Error retrieving session for charge ID:', err);
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const customerEmail = (session.customer_email || session.metadata?.email || '').trim() || null;
+
+      // Normalize payment_intent id whether session contains string or object
+      const paymentIntentId = typeof session.payment_intent === 'string'
+        ? session.payment_intent
+        : session.payment_intent?.id;
+
+      let chargeId = null;
+      if (paymentIntentId) {
+        try {
+          const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+            expand: ['latest_charge'],
+          });
+          chargeId = pi.latest_charge?.id || null;
+        } catch (err) {
+          console.error('Error retrieving PaymentIntent to get charge ID:', err);
+        }
+      } else {
+        // fallback: sometimes session may already include expanded payment_intent.latest_charge
+        chargeId = session.payment_intent?.latest_charge?.id || null;
       }
-    }
 
-    console.log(`Processing checkout.session.completed for email: ${customerEmail}, charge: ${chargeId}`);
-    
-    if (customerEmail) {
-      try {
-        await db.update(users)
-          .set({ isPremium: true, stripeChargeId: chargeId })
-          .where(eq(users.email, customerEmail));
-      } catch (err) {
-        console.error('Failed to update user premium status:', err);
+      const chargeIdClean = chargeId?.trim() || null;
+      console.log(`Processing checkout.session.completed for email: ${customerEmail}, payment_intent: ${paymentIntentId}, charge: ${chargeIdClean}`);
+
+      if (customerEmail) {
+        try {
+          await db.update(users)
+            .set({
+              isPremium: true,
+              stripeChargeId: chargeIdClean,
+              stripePaymentIntentId: paymentIntentId?.trim() || null
+            })
+            .where(eq(users.email, customerEmail));
+        } catch (err) {
+          console.error('Failed to update user premium status:', err);
+        }
       }
-    }
 
-  } else if (event.type === 'charge.dispute.created') {
-    const dispute = event.data.object;
-    const chargeId = dispute.charge;
-    console.log(`Processing charge.dispute.created for charge: ${chargeId}`);
-    await handleStatusUpdate(chargeId, false, 'chargeId');
+    } else if (event.type === 'charge.dispute.created' || event.type === 'charge.dispute.closed') {
+      const dispute = event.data.object;
+      const chargeId = dispute.charge ? (dispute.charge.trim?.() ?? dispute.charge) : null;
+      const paymentIntentId = dispute.payment_intent ? (dispute.payment_intent.trim?.() ?? dispute.payment_intent) : null;
 
-  } else if (event.type === 'charge.dispute.closed') {
-    const dispute = event.data.object;
-    const chargeId = dispute.charge;
-    console.log(`Processing charge.dispute.closed for charge: ${chargeId}, status: ${dispute.status}`);
-    
-    if (dispute.status === 'won') {
-      await handleStatusUpdate(chargeId, true, 'chargeId');
+      console.log(`Processing ${event.type} for dispute: ${dispute.id}, charge: ${chargeId}, payment_intent: ${paymentIntentId}, status: ${dispute.status}`);
+
+      if (chargeId) {
+        await handleStatusUpdate(chargeId, event.type === 'charge.dispute.closed' && dispute.status === 'won' ? true : false, 'chargeId');
+      } else if (paymentIntentId) {
+        // If dispute references payment_intent instead of charge, try matching by PI
+        await handleStatusUpdate(paymentIntentId, event.type === 'charge.dispute.closed' && dispute.status === 'won' ? true : false, 'paymentIntent');
+      } else {
+        console.warn('Dispute does not contain charge or payment_intent; no action taken.');
+      }
+
+    } else if (event.type === 'charge.refunded') {
+      const charge = event.data.object;
+      const chargeId = charge.id?.trim?.();
+      if (charge.refunded) {
+        console.log(`Full refund detected for charge: ${chargeId}. Revoking premium.`);
+        await handleStatusUpdate(chargeId, false, 'chargeId');
+      } else {
+        console.log(`Partial refund detected for charge: ${chargeId}. Keeping premium.`);
+      }
+
+    } else if (event.type === 'refund.created') {
+      const refund = event.data.object;
+      console.log(`Refund created: ${refund.id} for charge: ${refund.charge}. Status: ${refund.status}`);
     } else {
-      console.log(`Dispute for ${chargeId} closed with status: ${dispute.status}. Premium remains inactive.`);
+      console.log('Unhandled event type:', event.type);
     }
-
-  } else if (event.type === 'charge.refunded') {
-    const charge = event.data.object;
-    const chargeId = charge.id;
-    
-    if (charge.refunded) {
-      console.log(`Full refund detected for charge: ${chargeId}. Revoking premium.`);
-      await handleStatusUpdate(chargeId, false, 'chargeId');
-    } else {
-      console.log(`Partial refund detected for charge: ${chargeId}. Keeping premium.`);
-    }
-
-  } else if (event.type === 'refund.created') {
-    const refund = event.data.object;
-    console.log(`Refund created: ${refund.id} for charge: ${refund.charge}. Status: ${refund.status}`);
+  } catch (err) {
+    console.error('Error processing webhook event:', err);
   }
 
   res.json({ received: true });
